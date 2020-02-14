@@ -1,1 +1,2 @@
-# pmpcheckerspec
+# PMPChecker Specification and Verification Models
+

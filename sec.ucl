@@ -1,0 +1,176 @@
+module main {
+
+    type * = common.*;
+
+    var reset : boolean;
+    var io_prv : bv2;   // Current CPU mode privilege, ascending order: 0 - User, 1 - System, 2 - Machine
+
+    // NAPOT : 
+    //  aaaaaaaaaaaaa0111111111 Mask
+    //  aaaaaaaaaaaaa0000000000 Base
+    //  
+    
+    var io_pmp : [bv3]pmp_t;
+
+    var io_addr : bv32;
+    var io_size : bv2;
+    var io_r, io_w, io_x : boolean;
+
+    var in_region, aligned : [bv3]boolean;
+
+    assume (forall (i : bv3) :: (io_pmp[i]).cfg.a == 3bv2); // Using NAPOT addressing mode only
+
+    /*
+    node _T_463 = bits(_T_462.cfg.a, 0, 0) @[PMP.scala 51:31]
+    node _T_464 = cat(_T_462.addr, _T_463) @[Cat.scala 30:58]
+    node _T_465 = or(_T_464, UInt<1>("h00")) @[PMP.scala 51:36]
+    node _T_466 = add(_T_465, UInt<1>("h01")) @[PMP.scala 52:23]
+    node _T_467 = tail(_T_466, 1) @[PMP.scala 52:23]
+    node _T_468 = not(_T_467) @[PMP.scala 52:16]
+    node _T_469 = and(_T_465, _T_468) @[PMP.scala 52:14]
+    node _T_470 = cat(_T_469, UInt<2>("h03")) @[Cat.scala 30:58]
+    */
+
+    define base(i : bv3) : bv31 = (io_pmp[i]).addr ++ (io_pmp[i]).cfg.a[0:0];
+
+    assume (forall (i : bv3) :: (
+        (io_pmp[i]).mask == (base(i) & ~(base(i) + 1bv31)) ++ 1bv1));
+
+    /*
+    _T_39' = bv_left_shift(bv_zero_extend(4, io_size'), 7bv6);
+    _T_40' = _T_39'[2:0];
+    _T_41' = ~_T_40';
+    */
+    define UIntToOH1() : bv3 = ~bv_left_shift(bv_zero_extend(4, io_size), 7bv6)[2:0];
+
+    /*
+    _GEN_0' = bv_zero_extend(29, _T_41');
+    _T_42' = (io_pmp'[7bv3]).mask | _GEN_0';
+    */
+    define lsbMask(i : bv3) : bv32 = (io_pmp[i]).mask | bv_zero_extend(29, UIntToOH1());
+    
+
+    /*
+    _GEN_1' = bv_zero_extend(2, (io_pmp'[7bv3]).addr);
+    _T_44' = bv_left_shift(2, _GEN_1');
+    _T_45' = ~_T_44';
+    _T_46' = _T_45' | 3bv32;
+    _T_47' = ~_T_46';
+    */
+    define comparand(i : bv3) : bv32 = ~(~(bv_left_shift(2, bv_zero_extend(2, (io_pmp[i]).addr)) | 3bv32));
+
+    /*
+    _T_43' = io_addr'[31:3];
+    _T_47' = comparand(i);
+    _T_48' = _T_47'[31:3];
+    _T_49' = (io_pmp'[7bv3]).mask[31:3];
+    _T_50' = _T_43' ^ _T_48';
+    _T_51' = ~_T_49';
+    _T_52' = _T_50' & _T_51';
+    _T_53' = _T_52' == 0bv29;
+    */
+    define msbMatch(i : bv3) : boolean = 0bv29 == ((io_addr[31:3] ^ comparand(i)[31:3]) & ~(io_pmp[i]).mask[31:3]);
+
+    /*
+    _T_54' = io_addr'[2:0];
+    _T_59' = _T_47'[2:0];
+    _T_60' = lsbMask(i)[2:0];
+    _T_61' = _T_54' ^ _T_59';
+    _T_62' = ~_T_60';
+    _T_63' = _T_61' & _T_62';
+    _T_64' = _T_63' == 0bv3;
+    */
+    define lsbMatch(i : bv3) : boolean = 0bv3 == ((io_addr[2:0] ^ comparand(i)[2:0]) & ~lsbMask(i)[2:0]);
+
+    define hit(i : bv3) : boolean = msbMatch(i) && lsbMatch(i); 
+
+    /*
+    _T_169' = (io_pmp'[7bv3]).mask[2:0];
+    _T_170' = ~_T_169';
+    _T_171' = _T_41' & _T_170';
+    _T_172' = _T_171' == 0bv3;
+    */
+    define aligned_macro(i : bv3) : boolean = 0bv3 == (UIntToOH1() & ~(io_pmp[i]).mask[2:0]);
+
+
+    instance pmp : PMPChecker(
+        reset : (reset),
+        io_prv : (io_prv),
+        io_pmp : (io_pmp),
+        io_addr : (io_addr),
+        io_size : (io_size),
+        io_r : (io_r),
+        io_w : (io_w),
+        io_x : (io_x)
+    );
+
+
+    init {
+        assume (io_prv == 3bv2);
+        assume (io_r && io_w && io_x);
+        assume (in_region[0bv3] && !(io_pmp[0bv3]).cfg.l);
+    }
+
+    next {
+        next(pmp);
+    }
+
+    // Ensures that if a PMP region contains the input address, then in_region boolean will be true
+    assume (forall (i : bv3) :: in_region[i] == hit(i));
+    // Ensures that an access does not cross the boundary of the region
+    assume (forall (i : bv3) :: aligned[i] == aligned_macro(i));
+
+    // The default if in M mode, and not contained in any regions, should be to have access
+    invariant m_mode_default : (io_prv == 3bv2 && (forall (i : bv3) :: (io_pmp[i]).cfg.l == false)) ==> (io_r && io_w && io_x);
+    // When not in M (or H) mode, the returned permissions correspond to the highest priority PMP region that contains our access
+    invariant highest_priority : (io_prv != 3bv2 && io_prv != 2bv2) ==>
+        (forall (i : bv3) :: (in_region[i] && !(exists (j : bv3) :: in_region[j] && (0bv1 ++ i > 0bv1 ++ j))) ==>
+            (io_r == ((io_pmp[i]).cfg.r && aligned[i]) &&
+             io_w == ((io_pmp[i]).cfg.w && aligned[i]) &&
+             io_x == ((io_pmp[i]).cfg.x && aligned[i])));
+    invariant locks_prevent_m_mode_default : (io_prv == 3bv2) ==>
+        (forall (i : bv3) :: (in_region[i] && !(exists (j : bv3) :: in_region[j] && (0bv1 ++ i > 0bv1 ++ j)) && (io_pmp[i]).cfg.l) ==>
+            (io_r == ((io_pmp[i]).cfg.r && aligned[i]) &&
+             io_w == ((io_pmp[i]).cfg.w && aligned[i]) &&
+             io_x == ((io_pmp[i]).cfg.x && aligned[i])));
+
+    control {
+        v = induction(1);
+        check;
+        print_results;
+        v.print_cex();
+        v.print_cex(
+            reset,
+            io_prv,
+            io_addr,
+            io_size,
+            io_pmp[0bv3],
+            in_region[0bv3],
+            aligned[0bv3],
+            io_pmp[1bv3],
+            in_region[1bv3],
+            aligned[1bv3],
+            io_pmp[2bv3],
+            in_region[2bv3],
+            aligned[2bv3],
+            io_pmp[3bv3],
+            in_region[3bv3],
+            aligned[3bv3],
+            io_pmp[4bv3],
+            in_region[4bv3],
+            aligned[4bv3],
+            io_pmp[5bv3],
+            in_region[5bv3],
+            aligned[5bv3],
+            io_pmp[6bv3],
+            in_region[6bv3],
+            aligned[6bv3],
+            io_pmp[7bv3],
+            in_region[7bv3],
+            aligned[7bv3],
+            io_r,
+            io_w,
+            io_x
+        );
+    }
+}
